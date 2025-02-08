@@ -5,6 +5,8 @@ M.live_chat_job = nil
 M.channel_buffers = M.channel_buffers or {}
 M.error_channel = "errors"
 M.active_channel = nil
+M.channel_tree = nil
+
 
 -- Function to close both buffers and stop the job.
 function M.CloseLiveChat(chan_buf, msg_buf)
@@ -23,7 +25,6 @@ end
 -- Function to send a message to the backend.
 -- This function uses the IPC system you implemented earlier.
 function M.post_message(channel_id, message_body)
-  print("posting \"" .. message_body .. "\" to " .. channel_id)
   local uv = vim.loop
   local function send_command(cmd_table)
     local socket = uv.new_pipe(false)
@@ -33,6 +34,7 @@ function M.post_message(channel_id, message_body)
         return
       end
       local json_cmd = vim.json.encode(cmd_table) .. "\n"
+      print("posting \"" .. json_cmd .. "\" to " .. channel_id)
       socket:write(json_cmd, function()
         socket:shutdown()
         socket:close()
@@ -43,7 +45,8 @@ function M.post_message(channel_id, message_body)
   send_command({
     command = "post_message",
     channel_id = channel_id,
-    body = message_body
+    body = message_body,
+    service = "my_dummy_service"
   })
 end
 
@@ -126,6 +129,9 @@ local function append_message(channel_id, message_text)
   end
 end
 
+local function debug(message)
+  append_message(M.error_channel, message)
+end
 
 
 function M.switch_to(channel_id)
@@ -154,7 +160,7 @@ local function create_channel_list_buffer()
   vim.bo[M.chan_buf].modifiable = false
 end
 
-local function add_channels(channels)
+local function add_channels_old(channels)
   local channel_display = {}
   local channel_mapping = {}  -- maps line numbers (1-indexed) to channel ids
 
@@ -171,6 +177,65 @@ local function add_channels(channels)
   M.switch_to(M.active_channel or channels[1].id)
 end
 
+local function add_channels(channels)
+  local NT = require("nui.tree")
+  for _, chan in ipairs(channels) do
+    M.channel_tree:add_node(NT.Node({ text = chan.name, channel_id = chan.id }))
+  end
+  M.channel_tree:render(1)
+end
+
+local function make_channel_split()
+  -- Create a vertical split for the sidebar.
+  -- vim.cmd("vsplit")
+  -- vim.cmd("wincmd h")
+  local NuiTree = require("nui.tree")
+  local Split = require("nui.split")
+  local NuiLine = require("nui.line")
+
+  local split = Split({
+    relative = "win",
+    position = "left",
+    size = 40,
+  })
+
+  split:mount()
+
+  -- quit
+  split:map("n", "q", function()
+    split:unmount()
+  end, { noremap = true })
+  M.channel_tree = NuiTree({ winid = split.winid,
+    bufnr = split.bufnr,
+    nodes = { NuiTree.Node( { text = "Error log", channel_id = M.error_channel })},
+    prepare_node = function(node)
+      local line = NuiLine()
+
+      line:append(string.rep("  ", node:get_depth() - 1))
+
+      if node:has_children() then
+        line:append(node:is_expanded() and " " or " ", "SpecialChar")
+      else
+        line:append("  ")
+      end
+
+      line:append(node.text)
+
+      return line
+    end,
+
+  })
+
+  local map_options = { noremap = true, nowait = true }
+
+  -- print current node
+  split:map("n", "<CR>", function()
+    local node = M.channel_tree:get_node()
+    debug("Switching to " .. node.channel_id)
+    M.switch_to(node.channel_id)
+  end, map_options)
+end
+
 local function handle_event(json_event)
   local ok, msg_obj = pcall(vim.fn.json_decode, json_event)
   if ok and type(msg_obj) == "table" then
@@ -182,24 +247,24 @@ local function handle_event(json_event)
       local channels = msg_obj.channels
       add_channels(channels)
     else
+      print(json_event)
       append_message(M.error_channel, json_event)
     end
   else
     -- If JSON decoding fails, fallback to a default channel.
+    print(json_event)
     append_message(M.error_channel, json_event)
   end
 end
 
 function M.chat()
-  -- Create a vertical split for the sidebar.
-  vim.cmd("vsplit")
-  vim.cmd("wincmd h")
-  create_channel_list_buffer()
+  -- make_channel_list()
   -- add_channels(channels)
   -- Open (or move to) the right window for the live messages.
-  vim.cmd("wincmd l")
+  -- vim.cmd("wincmd l")
   M.msg_win = vim.api.nvim_get_current_win()
-
+  make_channel_split()
+  M.switch_to(M.error_channel)
   -- Define a function that will close both buffers.
   local close_both = function()
     M.CloseLiveChat(M.chan_buf, msg_buf)
@@ -211,7 +276,7 @@ function M.chat()
   -- Start the asynchronous job for live messages.
   -- Adjust the path and flag as needed. Here we assume that running the binary with '--live'
   -- will continuously print new messages to stdout.
-  local cmd = "~/usr/src/kbunified/target/release/kbunified"
+  local cmd = "~/src/kbunified/target/release/kbunified ~/src/kbunified/config.toml"
   local job_id = vim.fn.jobstart(cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data, _)
