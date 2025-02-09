@@ -176,16 +176,12 @@ local function maintain_draft_position(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
   if not draft_start then return end  -- no draft to take care of.
   local total_lines = vim.api.nvim_buf_line_count(buf)
-  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
-  local draft_lines = vim.api.nvim_buf_get_var(buf, "draft_lines")
   local draft_height = #vim.api.nvim_buf_get_lines(buf, draft_start - 1, -1, false)
 
   if draft_start and draft_start < total_lines then
     draft_start = total_lines - draft_height + 1
   end
   vim.api.nvim_buf_set_var(buf, "draft_start", draft_start)
-  print(draft_start)
-
 end
 
 local function split_message(message)
@@ -196,17 +192,57 @@ local function split_message(message)
     return lines
 end
 
+local function adjust_viewport(buf)
+    local total_lines = vim.api.nvim_buf_line_count(buf)
+    local win_height = vim.api.nvim_win_get_height(0)
+
+    -- If there are fewer messages than window height, add padding at the top
+    if total_lines < win_height then
+        local padding_needed = win_height - total_lines
+        vim.api.nvim_buf_set_lines(buf, 0, 0, false, vim.fn["repeat"]({ "" }, padding_needed))
+    end
+end
+
+local function is_at_bottom(buf)
+  local last_line = vim.api.nvim_buf_line_count(buf)
+  print("last line " .. last_line)
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  print("cursor line " .. cursor_line)
+  return cursor_line >= last_line - 2
+end
+
+local function last_line_is_visible(buf)
+  local is_active = vim.api.nvim_win_get_buf(M.msg_win) == buf
+  if not is_active then
+    return false
+  end
+  local last_line = vim.api.nvim_buf_line_count(buf)
+  local last_visible_line = vim.api.nvim_win_call(M.msg_win, function ()
+    return vim.fn.line("w$")
+  end)
+  return last_visible_line >= last_line
+end
+
+
 -- Function to update a message buffer with a new message.
 local function append_message(channel_id, message_text)
   local buf = get_channel_buffer(channel_id)
+  -- adjust_viewport(buf)
   -- vim.bo[buf].modifiable = true
   local total_lines = vim.api.nvim_buf_line_count(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
   local insert_pos = draft_start and draft_start - 1 or total_lines
   local message_lines = split_message(message_text)
+  local should_scroll = last_line_is_visible(buf)
   vim.api.nvim_buf_set_lines(buf, insert_pos, insert_pos, false, message_lines)
-  if not draft_start then return end  -- no draft to take care of.
+  if not draft_start then
+    -- if should_scroll then
+    --   vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_line_count(buf), 0 })
+    -- end
+    return
+  end
   vim.api.nvim_buf_set_var(buf, "draft_start", draft_start + #message_lines)
+
   maintain_draft_position(buf)
   -- vim.bo[buf].modifiable = false
   -- Optionally, if this buffer is active in a window, scroll to the bottom.
@@ -223,7 +259,10 @@ end
 
 
 function M.switch_to(channel_id)
-  vim.api.nvim_win_set_buf(M.msg_win, get_channel_buffer(channel_id))
+  local buf = get_channel_buffer(channel_id)
+  vim.api.nvim_win_set_buf(M.msg_win, buf)
+  vim.api.nvim_set_current_win(M.msg_win)
+  vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_line_count(buf), 0 })
   M.active_channel = channel_id
 end
 
