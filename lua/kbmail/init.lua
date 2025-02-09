@@ -93,12 +93,16 @@ end
 local function start_draft(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
   if draft_start then return end  -- do not start a draft when there is already one.
+  -- remove blank line
+  vim.api.nvim_buf_set_lines(buf, -2, -1, false, {})
+
   vim.api.nvim_buf_set_var(buf, "draft_start", vim.api.nvim_buf_line_count(buf) + 1)
   vim.api.nvim_buf_set_var(buf, "draft_lines", { "" })
 
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, vim.api.nvim_buf_get_var(buf, "draft_lines"))
   vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_get_var(buf, "draft_start"), 0 })
   vim.api.nvim_buf_del_keymap(buf, "n", "i")
+  -- vim.api.nvim_feedkeys("i", "n", false)
 end
 
 local function send_draft(buf, channel_id)
@@ -113,9 +117,9 @@ local function send_draft(buf, channel_id)
   if #lines > 0 and lines[1] ~= "" then
     M.post_message(channel_id, table.concat(lines, "\n"))
   end
-  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
+  -- vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
 
-  -- vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
+  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
   vim.api.nvim_buf_set_var(buf, "draft_start", nil)
 end
 
@@ -127,12 +131,23 @@ local function cancel_draft(buf)
     start_draft(buf)
   end, { buffer = buf, silent = true })
   -- Remove the draft lines
-  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
+  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
 
   -- Reset draft state
   vim.api.nvim_buf_set_var(buf, "draft_start", nil)
 
   -- vim.api.nvim_echo({ { "Draft cancelled", "WarningMsg" } }, false, {})
+end
+
+local function adjust_viewport(buf)
+    local total_lines = vim.api.nvim_buf_line_count(buf)
+    local win_height = vim.api.nvim_win_get_height(M.msg_win)
+
+    -- If there are fewer messages than window height, add padding at the top
+    if total_lines < win_height then
+        local padding_needed = win_height - total_lines
+        vim.api.nvim_buf_set_lines(buf, 0, 0, false, vim.fn["repeat"]({ "" }, padding_needed))
+    end
 end
 
 -- Function to get or create a message buffer for a given channel id.
@@ -144,11 +159,14 @@ local function get_channel_buffer(channel_id)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype   = "nofile"
   vim.bo[buf].bufhidden = "hide"
+  vim.api.nvim_buf_set_name(buf, "[" .. channel_id .. "]")
   -- vim.bo[buf].modifiable = false
   -- Optionally, set keymaps for closing the buffer.
   vim.keymap.set("n", "q", function() vim.api.nvim_buf_delete(buf, { force = true }) end, { buffer = buf, silent = true })
   -- vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "This is the conversation for " .. channel_id .. " id: " .. vim.inspect(buf) })
+  adjust_viewport(buf)
+  vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "This is the begining of the conversation for " .. channel_id .. " id: " .. vim.inspect(buf) })
+  vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
   -- vim.bo[buf].modifiable = false
   M.channel_buffers[channel_id] = buf
   vim.api.nvim_buf_set_var(buf, "channel_id", channel_id)
@@ -192,16 +210,7 @@ local function split_message(message)
     return lines
 end
 
-local function adjust_viewport(buf)
-    local total_lines = vim.api.nvim_buf_line_count(buf)
-    local win_height = vim.api.nvim_win_get_height(0)
 
-    -- If there are fewer messages than window height, add padding at the top
-    if total_lines < win_height then
-        local padding_needed = win_height - total_lines
-        vim.api.nvim_buf_set_lines(buf, 0, 0, false, vim.fn["repeat"]({ "" }, padding_needed))
-    end
-end
 
 local function is_at_bottom(buf)
   local last_line = vim.api.nvim_buf_line_count(buf)
@@ -231,7 +240,7 @@ local function append_message(channel_id, message_text)
   -- vim.bo[buf].modifiable = true
   local total_lines = vim.api.nvim_buf_line_count(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
-  local insert_pos = draft_start and draft_start - 1 or total_lines
+  local insert_pos = draft_start and draft_start - 1 or total_lines - 1
   local message_lines = split_message(message_text)
   local should_scroll = last_line_is_visible(buf)
   vim.api.nvim_buf_set_lines(buf, insert_pos, insert_pos, false, message_lines)
