@@ -90,6 +90,51 @@ function M.open_send_message_window(channel_id)
   end, { buffer = buf, noremap = true, silent = true })
 end
 
+local function start_draft(buf)
+  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
+  if draft_start then return end  -- do not start a draft when there is already one.
+  vim.api.nvim_buf_set_var(buf, "draft_start", vim.api.nvim_buf_line_count(buf) + 1)
+  vim.api.nvim_buf_set_var(buf, "draft_lines", { "" })
+
+  vim.api.nvim_buf_set_lines(buf, -1, -1, false, vim.api.nvim_buf_get_var(buf, "draft_lines"))
+  vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_get_var(buf, "draft_start"), 0 })
+  vim.api.nvim_buf_del_keymap(buf, "n", "i")
+end
+
+local function send_draft(buf, channel_id)
+  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
+  if not draft_start then return end
+
+  vim.keymap.set("n", "i", function()
+    start_draft(buf)
+  end, { buffer = buf, silent = true })
+
+  local lines = vim.api.nvim_buf_get_lines(buf, draft_start - 1, -1, false)
+  if #lines > 0 and lines[1] ~= "" then
+    M.post_message(channel_id, table.concat(lines, "\n"))
+  end
+  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
+
+  -- vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
+  vim.api.nvim_buf_set_var(buf, "draft_start", nil)
+end
+
+local function cancel_draft(buf)
+  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
+  if not draft_start then return end
+
+  vim.keymap.set("n", "i", function()
+    start_draft(buf)
+  end, { buffer = buf, silent = true })
+  -- Remove the draft lines
+  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
+
+  -- Reset draft state
+  vim.api.nvim_buf_set_var(buf, "draft_start", nil)
+
+  -- vim.api.nvim_echo({ { "Draft cancelled", "WarningMsg" } }, false, {})
+end
+
 -- Function to get or create a message buffer for a given channel id.
 local function get_channel_buffer(channel_id)
   if M.channel_buffers[channel_id] and vim.api.nvim_buf_is_valid(M.channel_buffers[channel_id]) then
@@ -99,34 +144,77 @@ local function get_channel_buffer(channel_id)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype   = "nofile"
   vim.bo[buf].bufhidden = "hide"
-  vim.bo[buf].modifiable = false
+  -- vim.bo[buf].modifiable = false
   -- Optionally, set keymaps for closing the buffer.
   vim.keymap.set("n", "q", function() vim.api.nvim_buf_delete(buf, { force = true }) end, { buffer = buf, silent = true })
-  vim.bo[buf].modifiable = true
+  -- vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "This is the conversation for " .. channel_id .. " id: " .. vim.inspect(buf) })
-  vim.bo[buf].modifiable = false
+  -- vim.bo[buf].modifiable = false
   M.channel_buffers[channel_id] = buf
   vim.api.nvim_buf_set_var(buf, "channel_id", channel_id)
+  vim.api.nvim_buf_set_var(buf, "draft_start", nil)
+  vim.api.nvim_buf_set_var(buf, "draft_lines", {})
   vim.keymap.set("n", "c", function()
     -- Retrieve the channel id from the current buffer.
     -- local channel_id = vim.api.nvim_buf_get_var(0, "channel_id")
     M.open_send_message_window(channel_id)
   end, { buffer = buf, silent = true })
+  vim.keymap.set("n", "i", function()
+    start_draft(buf)
+  end, { buffer = buf, silent = true, noremap = true })
+  vim.keymap.set("n", "<Enter>", function ()
+    send_draft(buf, channel_id)
+  end,{ buffer = buf, silent = true })
+  vim.keymap.set("n", "<leader>q", function ()
+    cancel_draft(buf)
+  end, { buffer = buf, silent = true, noremap = true })
+  -- vim.api.nvim_buf_set_keymap(buf, "n", "<leader>q", ":lua cancel_draft()<CR>", { noremap = true, silent = true })
   return buf
+end
+
+local function maintain_draft_position(buf)
+  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
+  if not draft_start then return end  -- no draft to take care of.
+  local total_lines = vim.api.nvim_buf_line_count(buf)
+  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
+  local draft_lines = vim.api.nvim_buf_get_var(buf, "draft_lines")
+  local draft_height = #vim.api.nvim_buf_get_lines(buf, draft_start - 1, -1, false)
+
+  if draft_start and draft_start < total_lines then
+    draft_start = total_lines - draft_height + 1
+  end
+  vim.api.nvim_buf_set_var(buf, "draft_start", draft_start)
+  print(draft_start)
+
+end
+
+local function split_message(message)
+    local lines = {}
+    for line in message:gmatch("[^\r\n]+") do
+        table.insert(lines, line)
+    end
+    return lines
 end
 
 -- Function to update a message buffer with a new message.
 local function append_message(channel_id, message_text)
   local buf = get_channel_buffer(channel_id)
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, -1, -1, false, { message_text })
-  vim.bo[buf].modifiable = false
+  -- vim.bo[buf].modifiable = true
+  local total_lines = vim.api.nvim_buf_line_count(buf)
+  local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
+  local insert_pos = draft_start and draft_start - 1 or total_lines
+  local message_lines = split_message(message_text)
+  vim.api.nvim_buf_set_lines(buf, insert_pos, insert_pos, false, message_lines)
+  if not draft_start then return end  -- no draft to take care of.
+  vim.api.nvim_buf_set_var(buf, "draft_start", draft_start + #message_lines)
+  maintain_draft_position(buf)
+  -- vim.bo[buf].modifiable = false
   -- Optionally, if this buffer is active in a window, scroll to the bottom.
-  local wins = vim.fn.win_findbuf(buf)
-  for _, win in ipairs(wins) do
-    local total_lines = vim.api.nvim_buf_line_count(buf)
-    vim.api.nvim_win_set_cursor(win, { total_lines, 0 })
-  end
+  -- local wins = vim.fn.win_findbuf(buf)
+  -- for _, win in ipairs(wins) do
+  --   local total_lines = vim.api.nvim_buf_line_count(buf)
+  --   vim.api.nvim_win_set_cursor(win, { total_lines, 0 })
+  -- end
 end
 
 local function debug(message)
@@ -139,44 +227,6 @@ function M.switch_to(channel_id)
   M.active_channel = channel_id
 end
 
-local function create_channel_list_buffer()
-  local chan_win = vim.api.nvim_get_current_win()
-  M.chan_buf = vim.api.nvim_create_buf(false, true) -- not listed, scratch
-  vim.api.nvim_buf_set_keymap(M.chan_buf, "n", "q", "", {})  -- set below after creating msg_buf
-  vim.api.nvim_win_set_buf(chan_win, M.chan_buf)
-  vim.keymap.set("n", "<CR>", function ()
-    local line = vim.fn.line(".")
-    local mapping = M.channel_mappings[M.chan_buf] or {}
-    local channel_id = mapping[line]
-    if channel_id then
-      M.switch_to(channel_id)
-    else
-      print("No channel id found for this line")
-    end
-  end, { buffer = M.chan_buf, silent = true })  -- set below after creating msg_buf
-
-  vim.bo[M.chan_buf].buftype   = "nofile"
-  vim.bo[M.chan_buf].bufhidden = "wipe"
-  vim.bo[M.chan_buf].modifiable = false
-end
-
-local function add_channels_old(channels)
-  local channel_display = {}
-  local channel_mapping = {}  -- maps line numbers (1-indexed) to channel ids
-
-  for i, chan in ipairs(channels) do
-    table.insert(channel_display, chan.name)
-    channel_mapping[i] = chan.id
-  end
-
-  vim.bo[M.chan_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(M.chan_buf, 0, -1, false, channel_display)
-  vim.bo[M.chan_buf].modifiable = false
-  M.channel_mappings = M.channel_mappings or {}
-  M.channel_mappings[M.chan_buf] = channel_mapping
-  M.switch_to(M.active_channel or channels[1].id)
-end
-
 local function add_channels(channels)
   local NT = require("nui.tree")
   for _, chan in ipairs(channels) do
@@ -187,8 +237,6 @@ end
 
 local function make_channel_split()
   -- Create a vertical split for the sidebar.
-  -- vim.cmd("vsplit")
-  -- vim.cmd("wincmd h")
   local NuiTree = require("nui.tree")
   local Split = require("nui.split")
   local NuiLine = require("nui.line")
