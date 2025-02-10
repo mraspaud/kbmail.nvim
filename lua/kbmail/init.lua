@@ -7,6 +7,7 @@ M.error_channel = "errors"
 M.active_channel = nil
 M.channel_tree = nil
 
+local ns_id = vim.api.nvim_create_namespace("chat_ui")
 
 -- Function to close both buffers and stop the job.
 function M.CloseLiveChat(chan_buf, msg_buf)
@@ -90,18 +91,26 @@ function M.open_send_message_window(channel_id)
   end, { buffer = buf, noremap = true, silent = true })
 end
 
+local function show_message_indicator(buf, line)
+    vim.api.nvim_buf_set_extmark(buf, ns_id, line - 1, 0, {
+        virt_text = { { "┃", "ChatEditingIndicator" } },
+        virt_text_pos = "right_align",
+        hl_mode = "combine",
+    })
+end
 local function start_draft(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
   if draft_start then return end  -- do not start a draft when there is already one.
   -- remove blank line
   vim.api.nvim_buf_set_lines(buf, -2, -1, false, {})
-
+  new_draft_start = vim.api.nvim_buf_line_count(buf) + 1
   vim.api.nvim_buf_set_var(buf, "draft_start", vim.api.nvim_buf_line_count(buf) + 1)
 
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
-  vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_get_var(buf, "draft_start"), 0 })
+  vim.api.nvim_win_set_cursor(M.msg_win, { vim.api.nvim_buf_get_var(buf, "draft_start"), 0 })
   vim.api.nvim_buf_del_keymap(buf, "n", "i")
-  -- vim.api.nvim_feedkeys("i", "n", false)
+  vim.api.nvim_feedkeys("i", "n", false)
+  show_message_indicator(buf, new_draft_start)
 end
 
 local function send_draft(buf, channel_id)
@@ -163,9 +172,13 @@ local function get_channel_buffer(channel_id)
   -- Optionally, set keymaps for closing the buffer.
   vim.keymap.set("n", "q", function() vim.api.nvim_buf_delete(buf, { force = true }) end, { buffer = buf, silent = true })
   -- vim.bo[buf].modifiable = true
-  adjust_viewport(buf)
+  -- adjust_viewport(buf)
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "This is the begining of the conversation for " .. channel_id .. " id: " .. vim.inspect(buf) })
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
+  -- Top filling: Does not work
+  -- for i = 1, 50 do
+  --   vim.api.nvim_buf_set_extmark(0, ns_id, 0, 0, { virt_lines = { { { '~', 'String' } }, { { "~", "String" } } }, virt_lines_above = true })
+  -- end
   -- vim.bo[buf].modifiable = false
   M.channel_buffers[channel_id] = buf
   vim.api.nvim_buf_set_var(buf, "channel_id", channel_id)
@@ -208,16 +221,6 @@ local function split_message(message)
     return lines
 end
 
-
-
-local function is_at_bottom(buf)
-  local last_line = vim.api.nvim_buf_line_count(buf)
-  print("last line " .. last_line)
-  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
-  print("cursor line " .. cursor_line)
-  return cursor_line >= last_line - 2
-end
-
 local function last_line_is_visible(buf)
   local is_active = vim.api.nvim_win_get_buf(M.msg_win) == buf
   if not is_active then
@@ -230,6 +233,17 @@ local function last_line_is_visible(buf)
   return last_visible_line >= last_line
 end
 
+local unread_marker_id = nil
+
+local function show_unread_marker(buf)
+    if unread_marker_id then return end  -- Don't add it twice
+    print("showing")
+    local last_line = vim.api.nvim_buf_line_count(buf)
+    unread_marker_id = vim.api.nvim_buf_set_extmark(buf, ns_id, last_line, 0, {
+        virt_text = { { "  [New messages below]", "WarningMsg" } },
+        virt_text_pos = "eol",
+    })
+end
 
 -- Function to update a message buffer with a new message.
 local function append_message(channel_id, message_text)
@@ -247,6 +261,8 @@ local function append_message(channel_id, message_text)
       local cursor_pos = vim.api.nvim_win_get_cursor(0)  -- Save cursor position
       vim.api.nvim_win_set_cursor(M.msg_win, { vim.api.nvim_buf_line_count(buf), 0 })
       vim.api.nvim_win_set_cursor(M.msg_win, cursor_pos)
+    else
+      show_unread_marker(buf)
     end
     return
   end
@@ -272,6 +288,10 @@ function M.switch_to(channel_id)
   vim.api.nvim_win_set_buf(M.msg_win, buf)
   vim.api.nvim_set_current_win(M.msg_win)
   vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_line_count(buf), 0 })
+  -- Does not work
+  -- vim.api.nvim_win_call(M.msg_win, function ()
+  --   vim.fn.winrestview({ topfill = 50 })
+  -- end)
   M.active_channel = channel_id
 end
 
