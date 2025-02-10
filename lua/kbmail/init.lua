@@ -97,9 +97,8 @@ local function start_draft(buf)
   vim.api.nvim_buf_set_lines(buf, -2, -1, false, {})
 
   vim.api.nvim_buf_set_var(buf, "draft_start", vim.api.nvim_buf_line_count(buf) + 1)
-  vim.api.nvim_buf_set_var(buf, "draft_lines", { "" })
 
-  vim.api.nvim_buf_set_lines(buf, -1, -1, false, vim.api.nvim_buf_get_var(buf, "draft_lines"))
+  vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
   vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_get_var(buf, "draft_start"), 0 })
   vim.api.nvim_buf_del_keymap(buf, "n", "i")
   -- vim.api.nvim_feedkeys("i", "n", false)
@@ -117,9 +116,9 @@ local function send_draft(buf, channel_id)
   if #lines > 0 and lines[1] ~= "" then
     M.post_message(channel_id, table.concat(lines, "\n"))
   end
-  -- vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
+  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
 
-  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
+  -- vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
   vim.api.nvim_buf_set_var(buf, "draft_start", nil)
 end
 
@@ -131,7 +130,7 @@ local function cancel_draft(buf)
     start_draft(buf)
   end, { buffer = buf, silent = true })
   -- Remove the draft lines
-  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, { "" })
+  vim.api.nvim_buf_set_lines(buf, draft_start - 1, -1, false, {})
 
   -- Reset draft state
   vim.api.nvim_buf_set_var(buf, "draft_start", nil)
@@ -171,7 +170,6 @@ local function get_channel_buffer(channel_id)
   M.channel_buffers[channel_id] = buf
   vim.api.nvim_buf_set_var(buf, "channel_id", channel_id)
   vim.api.nvim_buf_set_var(buf, "draft_start", nil)
-  vim.api.nvim_buf_set_var(buf, "draft_lines", {})
   vim.keymap.set("n", "c", function()
     -- Retrieve the channel id from the current buffer.
     -- local channel_id = vim.api.nvim_buf_get_var(0, "channel_id")
@@ -240,14 +238,16 @@ local function append_message(channel_id, message_text)
   -- vim.bo[buf].modifiable = true
   local total_lines = vim.api.nvim_buf_line_count(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
-  local insert_pos = draft_start and draft_start - 1 or total_lines - 1
+  local insert_pos = draft_start and draft_start - 1 or total_lines
   local message_lines = split_message(message_text)
   local should_scroll = last_line_is_visible(buf)
   vim.api.nvim_buf_set_lines(buf, insert_pos, insert_pos, false, message_lines)
   if not draft_start then
-    -- if should_scroll then
-    --   vim.api.nvim_win_set_cursor(0, { vim.api.nvim_buf_line_count(buf), 0 })
-    -- end
+    if should_scroll then
+      local cursor_pos = vim.api.nvim_win_get_cursor(0)  -- Save cursor position
+      vim.api.nvim_win_set_cursor(M.msg_win, { vim.api.nvim_buf_line_count(buf), 0 })
+      vim.api.nvim_win_set_cursor(M.msg_win, cursor_pos)
+    end
     return
   end
   vim.api.nvim_buf_set_var(buf, "draft_start", draft_start + #message_lines)
@@ -372,7 +372,7 @@ function M.chat()
   -- Start the asynchronous job for live messages.
   -- Adjust the path and flag as needed. Here we assume that running the binary with '--live'
   -- will continuously print new messages to stdout.
-  local cmd = "~/src/kbunified/target/release/kbunified ~/src/kbunified/config.toml"
+  local cmd = "~/usr/src/kbunified/target/release/kbunified ~/usr/src/kbunified/config.toml"
   local job_id = vim.fn.jobstart(cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data, _)
