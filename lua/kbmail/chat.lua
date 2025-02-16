@@ -10,18 +10,17 @@ local function handle_event(json_event)
   if ok and type(msg_obj) == "table" then
     if msg_obj.event == "message" then
       local channel = { id = msg_obj.channel_id, service = { id = msg_obj.service.id }}
-      local body = msg_obj.message.author .. ":\n" .. msg_obj.message.body
-      messages.append_message(channel, body)
+      messages.append_message(channel, msg_obj.message)
     elseif msg_obj.event == "channel_list" then
       local channels = msg_obj.channels
       messages.add_channels(msg_obj.service, channels)
     else
       print("unknown event")
-      messages.append_message(messages.error_channel, json_event)
+      messages.debug(json_event)
     end
   else
     print("unknown type")
-    messages.append_message(messages.error_channel, json_event)
+    messages.debug(json_event)
   end
 end
 
