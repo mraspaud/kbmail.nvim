@@ -1,4 +1,5 @@
 
+-- local fidget = require("fidget")
 local M = {}
 
 M.error_channel = { id = "errors", name = "Error Log" }
@@ -16,13 +17,19 @@ vim.fn.sign_define("ChatEditingIndicator", {
 
 
 local function get_author_highlight(author)
-  if not M.author_colors[author] then
-    local group_name = "ChatAuthor_" .. author:gsub("%W", "_")
+  if not M.author_colors[author.id] then
+    local color = nil
+    if author.color then
+      color = author.color
+    else
+      color = "#00afff"
+    end
+    local group_name = "ChatAuthor_" .. author.id:gsub("%W", "_")
     -- Choose a color from a predefined palette or generate one dynamically.
-    vim.cmd(string.format("highlight %s guifg=%s", group_name, "#00afff"))
-    M.author_colors[author] = group_name
+    vim.cmd(string.format("highlight %s guifg=%s", group_name, color))
+    M.author_colors[author.id] = group_name
   end
-  return M.author_colors[author]
+  return M.author_colors[author.id]
 end
 
 
@@ -100,8 +107,11 @@ function M.create_channel_buffer(channel)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype   = "nofile"
   vim.bo[buf].bufhidden = "hide"
+  if channel ~= M.error_channel then
+    vim.bo[buf].filetype = "markdown"
+  end
   vim.keymap.set("n", "q", function() vim.api.nvim_buf_delete(buf, { force = true }) end, { buffer = buf, silent = true })
-  vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "This is the beginning of the conversation for " .. channel.name })
+  vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "# This is the beginning of the conversation for " .. channel.name })
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
   M.channel_buffers[channel_id] = buf
   vim.api.nvim_buf_set_var(buf, "channel", channel)
@@ -168,6 +178,25 @@ local function show_unread_marker(buf)
   })
 end
 
+local function scroll(buf, draft_start, message_lines)
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    local should_scroll = last_line_is_visible(win, #message_lines)
+    if not draft_start then
+      if should_scroll then
+        local cursor_pos = vim.api.nvim_win_get_cursor(win)
+        vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
+        vim.api.nvim_win_set_cursor(win, cursor_pos)
+      else
+        local channel = vim.api.nvim_buf_get_var(buf, "channel")
+        -- if channel.id ~= M.error_channel.id then
+        --   fidget.notify("New message in " .. channel.name)
+        -- end
+        show_unread_marker(buf)
+      end
+    end
+  end
+end
+
 function M.append_text_message(channel, message_text)
   local buf = M.get_channel_buffer(channel)
   local total_lines = vim.api.nvim_buf_line_count(buf)
@@ -181,83 +210,167 @@ function M.append_text_message(channel, message_text)
   local end_insert = insert_pos
   vim.api.nvim_buf_set_lines(buf, insert_pos, end_insert, false, message_lines)
 
-  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-    local should_scroll = last_line_is_visible(win, #message_lines)
-    if not draft_start then
-      if should_scroll then
-        local cursor_pos = vim.api.nvim_win_get_cursor(win)
-        vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
-        vim.api.nvim_win_set_cursor(win, cursor_pos)
+  scroll(buf, draft_start, message_lines)
+end
+
+local function insert_message(buf, draft_start, message, message_lines)
+  local old_message = M.message_registry[message.id]
+  local mark_id = nil
+  local virt_content = nil
+  local virt_lines = nil
+  local old_mark_id = nil
+  local start_thread = nil
+  local base_message = nil
+  local update_thread_mark = nil
+
+  -- updating, we already have a mark
+  if  old_message then
+    old_mark_id = old_message.mark_id
+  end
+  -- add annotations
+  if message.edit_time then
+    virt_content = "edited"
+  end
+  if message.replies then
+    local reply_word = "reply"
+    if message.replies.count > 1 then
+      reply_word = "replies"
+    end
+    virt_content = (virt_content or "") .. " " .. tostring(message.replies.count) .. " " .. reply_word
+  end
+  if message.reactions then
+    for emoji, users in pairs(message.reactions) do
+      virt_content = (virt_content or "") .. " " .. emoji .. tostring(#users)
+    end
+  end
+  if virt_content then
+    virt_lines = { { virt_content, "Comment" } }
+  end
+
+
+  -- find insert positions
+  local total_lines = vim.api.nvim_buf_line_count(buf)
+  local start_insert = draft_start and draft_start - 1 or total_lines
+  local end_insert = start_insert
+
+  if not old_message then -- for a new message
+    if message.thread_id then
+      update_thread_mark = true
+      M.debug("thread" .. vim.inspect(message.thread_id))
+      base_message = M.message_registry[message.thread_id]
+      M.debug("base message " .. vim.inspect(base_message))
+      if base_message then
+        local positions = nil
+        if base_message.thread_mark_id then
+          M.debug("threading")
+          positions = vim.api.nvim_buf_get_extmark_by_id(buf, ns_id, base_message.thread_mark_id, { details = true })
+        else
+          positions = vim.api.nvim_buf_get_extmark_by_id(buf, ns_id, base_message.mark_id, { details = true })
+        end
+        start_thread = positions[1]
+        start_insert = positions[3]["end_row"]
+        end_insert = start_insert
       else
-        show_unread_marker(buf)
+        return  -- ignore replies to threads we don't show
+      end
+    end
+  else  -- for an old message
+    local new_positions = vim.api.nvim_buf_get_extmark_by_id(buf, ns_id, old_message.mark_id, { details = true })
+    start_insert = new_positions[1]
+    M.debug(vim.inspect(start_insert))
+    local details = new_positions[3]
+    end_insert = details["end_row"]
+    if message.thread_id then
+      base_message = M.message_registry[message.thread_id]
+      if base_message then
+        if base_message.thread_mark_id then
+          local positions = vim.api.nvim_buf_get_extmark_by_id(buf, ns_id, base_message.thread_mark_id, { details = true })
+          start_thread = positions[1]
+          local end_row = positions[3]["end_row"]
+          if end_insert == end_row then
+            update_thread_mark = true
+          end
+        end
       end
     end
   end
+
+  -- insert lines
+  vim.api.nvim_buf_set_lines(buf, start_insert, end_insert, false, message_lines)
+
+  -- create/update message mark
+  mark_id = vim.api.nvim_buf_set_extmark(buf, ns_id, start_insert, 0, {
+    id = old_mark_id,
+    end_row = start_insert + #message_lines,
+    virt_text = virt_lines,
+    virt_text_pos = "right_align",
+    hl_mode = "combine",
+  })
+  message.mark_id = mark_id
+
+
+  -- create/update thread mark
+  if old_message and old_message.thread_mark_id then
+    M.debug("porting " .. vim.inspect(old_message.thread_mark_id))
+    message.thread_mark_id = old_message.thread_mark_id
+  end
+
+  M.debug("base message2 " .. vim.inspect(base_message))
+  if base_message and update_thread_mark then
+    local thread_mark_id = vim.api.nvim_buf_set_extmark(buf, ns_id, start_thread, 0, {
+      id = base_message.thread_mark_id,
+      end_row = start_insert + #message_lines,
+      hl_mode = "combine",
+    })
+
+    base_message.thread_mark_id = thread_mark_id
+    M.message_registry[base_message.id] = base_message
+    M.debug("base message3 " .. vim.inspect(M.message_registry[base_message.id]))
+  end
+
+  -- add message to registry
+  M.debug("recording " .. message.id)
+  M.message_registry[message.id] = message
+
+  -- take care of cosmetics
+  -- first line
+  local author_hl = get_author_highlight(message.author)
+  vim.api.nvim_buf_add_highlight(buf, ns_id, author_hl, start_insert, 0, #message.author.display_name)
+  vim.api.nvim_buf_add_highlight(buf, ns_id, "ChatTimeHighlight", start_insert, #message.author.display_name + 1, -1)
+
+  -- indent message body, and a bit more for thread replies
+  local extra_indent = ""
+  if message.thread_id then
+    extra_indent = "| "
+  end
+  vim.api.nvim_buf_set_extmark(buf, ns_id, start_insert, 0, {
+    virt_text = { { extra_indent, "Comment" } },
+    virt_text_pos = "inline",
+  })
+
+  for i = 1, (#message_lines - 1) do
+    M.debug(vim.inspect(start_insert+i))
+    vim.api.nvim_buf_set_extmark(buf, ns_id, start_insert + i, 0, {
+      virt_text = { { extra_indent .. "  ", "Comment" } },
+      virt_text_pos = "inline",
+    })
+  end
+
 end
 
+
 function M.append_message(channel, message)
-  local register_message = true
-  local body = message.author .. ":\n" .. message.body
+  local body = message.author.display_name .. " " .. message.ts_time .. "\n" .. message.body
   local buf = M.get_channel_buffer(channel)
-  local total_lines = vim.api.nvim_buf_line_count(buf)
   local draft_start = vim.api.nvim_buf_get_var(buf, "draft_start")
   local message_lines = split_message(body)
   if draft_start then
     vim.api.nvim_buf_set_var(buf, "draft_start", draft_start + #message_lines)
   end
 
-  local start_insert = draft_start and draft_start - 1 or total_lines
-  local end_insert = start_insert
-  local old_message = M.message_registry[message.id]
-  local mark_id = nil
-  if not old_message then
-    vim.api.nvim_buf_set_lines(buf, start_insert, end_insert, false, message_lines)
-    mark_id = vim.api.nvim_buf_set_extmark(buf, ns_id, start_insert, 0, {
-      end_row = start_insert + #message_lines,
-      hl_mode = "combine",
-    })
-  else
-    local new_positions = vim.api.nvim_buf_get_extmark_by_id(buf, ns_id, old_message.mark_id, { details = true })
-    start_insert = new_positions[1]
-    M.debug(vim.inspect(start_insert))
-    local details = new_positions[3]
-    end_insert = details["end_row"]
-    vim.api.nvim_buf_set_lines(buf, start_insert, end_insert, false, message_lines)
-    -- vim.api.nvim_buf_set_lines(buf, start, end_, strict_indexing, replacement)
-    mark_id = vim.api.nvim_buf_set_extmark(buf, ns_id, start_insert, 0, {
-      id = old_message.mark_id,
-      end_row = start_insert + #message_lines,
-    hl_mode = "combine",
-    })
+  insert_message(buf, draft_start, message, message_lines)
 
-  end
-  message.mark_id = mark_id
-  M.message_registry[message.id] = message
-  M.debug(vim.inspect(start_insert))
-
-  local author_hl = get_author_highlight(message.author)
-  vim.api.nvim_buf_add_highlight(buf, ns_id, author_hl, start_insert, 0, -1)
-
-  for i = 1, (#message_lines - 1) do
-    M.debug(vim.inspect(start_insert+i))
-    vim.api.nvim_buf_set_extmark(buf, ns_id, start_insert + i, 0, {
-      virt_text = { { "  ", "Comment" } },
-      virt_text_pos = "inline",
-    })
-  end
-
-  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-    local should_scroll = last_line_is_visible(win, #message_lines)
-    if not draft_start then
-      if should_scroll then
-        local cursor_pos = vim.api.nvim_win_get_cursor(win)
-        vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
-        vim.api.nvim_win_set_cursor(win, cursor_pos)
-      else
-        show_unread_marker(buf)
-      end
-    end
-  end
+  scroll(buf, draft_start, message_lines)
 end
 
 function M.debug(message)
@@ -265,18 +378,21 @@ function M.debug(message)
 end
 
 function M.switch_to(channel)
+  if channel.service then
+    local ipc = require("kbmail.ipc")
+    ipc.switch_channel(channel.service.id, channel.id)
+  end
   local buf = M.get_channel_buffer(channel)
   local prior_win = vim.fn.win_getid(vim.fn.winnr("#"))
   vim.api.nvim_win_set_buf(prior_win, buf)
   vim.api.nvim_set_current_win(prior_win)
-  vim.api.nvim_win_set_cursor(prior_win, { vim.api.nvim_buf_line_count(buf), 0 })
 end
 
 function M.add_channels(service, channels)
-  M.debug("adding " .. service.name)
+  M.debug("adding service: " .. service.name)
   for _, chan in ipairs(channels) do
     chan.service = service
-    M.debug("and " .. chan.name)
+    M.debug("channel: " .. chan.name)
     M.create_channel_buffer(chan)
   end
   local NuiTree = require("nui.tree")
