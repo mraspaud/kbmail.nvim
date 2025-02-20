@@ -36,31 +36,33 @@ T['works'] = function()
   eq(x, 2)
 end
 
-T["test create channel buffer"] = function()
-  local ch_name = "Test Channel 3"
-  local channel = { id = "test_channel_3",
-                       name = ch_name }
-  local buf = messages.create_channel_buffer(channel)
-  local printed = vim.api.nvim_buf_get_lines(buf, 1, 2, true)
-  vim.api.nvim_buf_delete(buf, {})
-
-  eq(printed[1], "# This is the beginning of the conversation for " .. ch_name)
-end
-
-T["test hook"] = function()
-  local printed = vim.api.nvim_buf_get_lines(test_buf, 1, 2, true)
-  eq(printed[1], "# This is the beginning of the conversation for Test Channel")
-end
-
-
 T["test append message"] = function()
-  local message = { author = { display_name = "good_old_me", id = "me" },
+  local display_name = "good_old_me"
+  local tstime = "11:11"
+  local message = { author = { display_name = display_name, id = "me" },
                     id = "fake_id",
-                    ts_time = "11:11",
+                    ts_time = tstime,
                     body = "Hello world" }
   messages.append_message(test_channel, message)
   local printed = vim.api.nvim_buf_get_lines(test_buf, -3, -1, true)
-  eq(printed, { "good_old_me 11:11", message.body })
+  eq(printed, { display_name .. " 11:11", message.body })
+  local author_line = 3
+  local extmarks = vim.api.nvim_buf_get_extmarks(test_buf, messages.ns_id, { author_line, 0 }, { author_line, -1 }, { details = true } )
+  local message_mark = extmarks[1]
+  eq(message_mark[2], 3)  -- start line
+  eq(message_mark[4]["end_row"], 5)  -- end line
+  eq(message_mark[4]["virt_text"], nil)
+  local author_mark = extmarks[2]
+  eq(author_mark[3], 0)  -- start col
+  eq(author_mark[4]["end_col"], string.len(display_name))  -- end line
+  local time_mark = extmarks[3]
+  eq(time_mark[3], string.len(display_name) + 1)  -- start col
+  eq(time_mark[4]["end_col"], string.len(display_name) + string.len(tstime) + 1)  -- end col
+  -- for _, mark in ipairs(extmarks) do
+  --   print(vim.inspect(mark))
+  -- end
+
+  eq(#extmarks, 3)
 end
 
 T["Test appending replies" ] = function()
@@ -83,6 +85,11 @@ T["Test appending replies" ] = function()
   printed = vim.api.nvim_buf_get_lines(test_buf, -3, -1, true)
   eq(printed, { "good_old_me 11:11", message.body,
         })
+  local author_line = 3
+  local extmarks = vim.api.nvim_buf_get_extmarks(test_buf, messages.ns_id, { author_line, 0 }, { author_line, -1 }, { details = true } )
+  local message_mark = extmarks[1]
+  eq(message_mark[4]["virt_text"], nil)
+  eq(#extmarks, 3)
 
   messages.append_message(test_channel, messag2)
   printed = vim.api.nvim_buf_get_lines(test_buf, -5, -1, true)
@@ -96,10 +103,16 @@ T["Test appending replies" ] = function()
                 "good_old_me 11:13", reply.body,
                 "good_old_me 11:12", messag2.body,
         })
+  author_line = 3
+  extmarks = vim.api.nvim_buf_get_extmarks(test_buf, messages.ns_id, { author_line, 0 }, { author_line, -1 }, { details = true } )
+  message_mark = extmarks[1]
+  eq(message_mark[4]["virt_text"][1][1], " 1 reply")
+  eq(#extmarks, 4)  -- we should have a thread extmark now too
 
   local modified = { author = { display_name = "good_old_me", id = "me" },
                      id = "fake_id",
                      ts_time = "11:11",
+                     edit_time = "11:15",
                      body = "Hello world from neovim!" }
   messages.append_message(test_channel, modified)
 
@@ -108,6 +121,12 @@ T["Test appending replies" ] = function()
                 "good_old_me 11:13", reply.body,
                 "good_old_me 11:12", messag2.body,
         })
+  author_line = 3
+  extmarks = vim.api.nvim_buf_get_extmarks(test_buf, messages.ns_id, { author_line, 0 }, { author_line, -1 }, { details = true } )
+  message_mark = extmarks[1]
+  eq(message_mark[2], 3)  -- start line
+  eq(message_mark[4]["end_row"], 5)  -- end line
+  eq(message_mark[4]["virt_text"][1][1], "edited")
 end
 
 return T
