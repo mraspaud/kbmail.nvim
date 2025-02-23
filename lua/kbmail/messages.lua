@@ -6,9 +6,17 @@ M.error_channel = { id = "errors", name = "Error Log" }
 M.channel_buffers = {}
 M.message_registry = M.message_registry or {}
 M.ordered_messages = M.ordered_messages or {}
+M.ordered_replies = M.ordered_replies or {}
 M.author_colors = M.author_colors or {}
+M.message_stylings = M.message_stylings or {}
 M.extra_line = true
+M.mark_levels = M.mark_levels or {}
 M.ns_id = vim.api.nvim_create_namespace("chat_ui")
+
+vim.wo.foldexpr = "v:lua.foldlevel_from_mark()"
+vim.wo.foldmethod = 'expr'
+vim.wo.foldcolumn = "auto"
+vim.wo.foldtext = "v:lua.foldtext_from_mark()"
 
 -- Define the sign used for editing indicators.
 vim.fn.sign_define("ChatEditingIndicator", {
@@ -105,6 +113,21 @@ local function get_id(channel)
   return channel_id
 end
 
+local function fetch_thread(buf)
+  local cursor_pos = vim.api.nvim_win_get_cursor(0)
+  local row = cursor_pos[1]
+  local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, {row, 0}, {row, -1}, {overlap=true})
+  for _, mark in ipairs(marks) do
+    local mark_id = mark[1]
+    local level = M.mark_levels[buf][mark_id]
+    if level and level["level"] == 0 then
+      local thread_id = level["message"].thread_id
+      local ipc = require("kbmail.ipc")
+      local channel = vim.api.nvim_buf_get_var(buf, "channel")
+      ipc.fetch_thread(channel.service.id, channel.id, thread_id)
+    end
+  end
+end
 
 function M.create_channel_buffer(channel)
   local channel_id = get_id(channel)
@@ -134,6 +157,9 @@ function M.create_channel_buffer(channel)
   vim.keymap.set("n", "<leader>q", function()
     cancel_draft(buf)
   end, { buffer = buf, silent = true, noremap = true })
+  vim.keymap.set("n", "<leader>a", function()
+    fetch_thread(buf)
+  end, { buffer = buf, silent = true, noremap = true })
 
   vim.api.nvim_buf_attach(buf, false, {
     on_lines = function(_, bufnr, _, _, _, _)
@@ -141,6 +167,10 @@ function M.create_channel_buffer(channel)
     end,
   })
   M.ordered_messages[buf] = {}
+  M.ordered_replies[buf] = {}
+  M.message_stylings[buf] = {}
+  M.message_registry[buf] = {}
+  M.mark_levels[buf] = {}
   return buf
 end
 
@@ -260,30 +290,72 @@ local function apply_styling(buf, message, start_insert)
   -- take care of cosmetics
   -- first line
   local author_hl = get_author_highlight(message.author)
-  vim.api.nvim_buf_add_highlight(buf, M.ns_id, author_hl, start_insert, 0, #message.author.display_name)
-  vim.api.nvim_buf_add_highlight(buf, M.ns_id, "ChatTimeHighlight", start_insert, #message.author.display_name + 1, #message.author.display_name + #message.ts_time + 1)
+  local author_mark_id = nil
+  local time_mark_id = nil
+  if M.message_stylings[buf][message.id] then
+    author_mark_id = M.message_stylings[buf][message.id]["author"]
+    time_mark_id = M.message_stylings[buf][message.id]["time"]
+  end
+  author_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0, { id = author_mark_id, end_col = #message.author.display_name, hl_group = author_hl })
+  time_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, #message.author.display_name + 1, { id = time_mark_id, end_col = #message.author.display_name + #message.ts_time + 1, hl_group = "ChatTimeHighlight" } )
+  M.message_stylings[buf][message.id] = { author = author_mark_id, time = time_mark_id }
 
   -- indent message body, and a bit more for thread replies
-  local extra_indent = ""
-  if is_inside_thread(message) then
-    extra_indent = "|   "
-  end
-  if extra_indent ~= "" then
-    vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0, {
-      virt_text = { { extra_indent, "ChatMessageIndent" } },
-      virt_text_pos = "inline",
-    })
-  end
-
-  for i = 1, (M.message_size(message) - 1) do
-    M.debug(vim.inspect(start_insert+i))
-    vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert + i, 0, {
-      virt_text = { { extra_indent .. "    ", "ChatMessageIndent" } },
-      virt_text_pos = "inline",
-    })
-  end
+  -- local extra_indent = ""
+  -- if is_inside_thread(message) then
+  --   extra_indent = "|   "
+  -- end
+  -- if extra_indent ~= "" then
+  --   vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0, {
+  --     virt_text = { { extra_indent, "ChatMessageIndent" } },
+  --     virt_text_pos = "inline",
+  --   })
+  -- end
+  --
+  -- for i = 1, (M.message_size(message) - 1) do
+  --   M.debug(vim.inspect(start_insert+i))
+  --   vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert + i, 0, {
+  --     virt_text = { { extra_indent .. "    ", "ChatMessageIndent" } },
+  --     virt_text_pos = "inline",
+  --     virt_text_repeat_linebreak = true,
+  --   })
+  -- end
 end
 
+local function insert_formatted_message(buf, message, start_line, end_line)
+  local old_message = M.message_registry[buf][message.id]
+  local old_mark_id = nil
+  if old_message then
+    old_mark_id = old_message.mark_id
+  end
+  local body = format_message(message)
+  local message_lines = split_lines(body)
+
+  local number_of_lines = #message_lines
+  local mark_id = nil
+
+  vim.api.nvim_buf_set_lines(buf, start_line, end_line, false, message_lines)
+  apply_styling(buf, message, start_line)
+
+
+  local virt_lines = generate_annotations(message)
+  mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_line, 0, {
+    id = old_mark_id,
+    end_row = start_line + number_of_lines,
+    virt_text = virt_lines,
+    virt_text_pos = "right_align",
+    hl_mode = "combine",
+  })
+  message.mark_id = mark_id
+  if is_inside_thread(message) then
+    M.mark_levels[buf][mark_id] = { level=1 , message=message}
+  else
+    M.mark_levels[buf][mark_id] = { level=0 , message=message}
+  end
+
+  -- add message to registry
+  M.message_registry[buf][message.id] = message
+end
 
 -- Returns the index where new_message should be inserted in the sorted array `arr`,
 -- searching backwards since most messages are inserted near the end.
@@ -297,16 +369,23 @@ local function reverse_search(arr, new_message)
   return 1  -- Insert at the beginning if new_message is earlier than all others.
 end
 
--- Use this function to insert new_message into the sorted array.
+-- Insert new_message into the sorted array if not already present, replaces the message with the same id otherwise. Returns the index of new_message in the array
 local function insert_into_ordered(arr, new_message)
   local idx = reverse_search(arr, new_message)
+  local prev = arr[idx - 1]
+  if prev and prev.id == new_message.id then
+    table.remove(arr, idx - 1)
+    table.insert(arr, idx - 1, new_message)
+    return idx - 1
+  end
+
   table.insert(arr, idx, new_message)
+  return idx
 end
 
 local function find_new_conversation_position(buf, draft_start, message)
   local total_lines = vim.api.nvim_buf_line_count(buf)
   local start_insert = nil
-  local end_insert = nil
   local message_position = reverse_search(M.ordered_messages[buf], message)
   local next_message = M.ordered_messages[buf][message_position]
   if next_message then
@@ -314,23 +393,50 @@ local function find_new_conversation_position(buf, draft_start, message)
   else
     start_insert = draft_start and draft_start - 1 or total_lines
   end
-  end_insert = start_insert
-  return start_insert, end_insert
+  return start_insert, start_insert
 end
 
+local function find_new_reply_position(buf, message)
+  local base_message = M.message_registry[buf][message.thread_id]
+  if not base_message then
+    error("No thread found for reply")  -- ignore replies to threads we don't show
+  end
+  if not M.ordered_replies[buf][message.thread_id] then
+    M.ordered_replies[buf][message.thread_id] = {}
+  end
+  local reply_position = reverse_search(M.ordered_replies[buf][message.thread_id], message)
+
+  local next_reply = M.ordered_replies[buf][message.thread_id][reply_position]
+  local start_insert = nil
+  if next_reply then
+    start_insert = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, next_reply.mark_id, {})[1]
+  else
+    local positions = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, base_message.thread_mark_id, { details = true })
+    start_insert = positions[3]["end_row"]
+  end
+  return start_insert, start_insert
+end
+
+local function get_thread_positions(buf, thread_id)
+  local base_message = M.message_registry[buf][thread_id]
+  local thread_positions = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, base_message.thread_mark_id, { })
+  local start_line = thread_positions[1]
+  local last_message = M.ordered_replies[buf][thread_id][#M.ordered_replies[buf][thread_id]]
+  local last_line = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, last_message.mark_id, { details = true })[3]["end_row"]
+
+  return start_line, last_line
+end
+
+local function get_message_positions(buf, message)
+  local message_positions = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, message.mark_id, { details = true })
+  local start_line = message_positions[1]
+  local last_line = message_positions[3]["end_row"]
+
+  return start_line, last_line
+end
 
 local function insert_message(buf, draft_start, message)
-  local old_message = M.message_registry[message.id]
-  local mark_id = nil
-  local old_mark_id = nil
-  local start_thread = nil
-  local last_message_in_thread = nil
-
-  -- updating, we already have a mark
-  if  old_message then
-    old_mark_id = old_message.mark_id
-  end
-
+  local old_message = M.message_registry[buf][message.id]
 
   -- find insert positions
   local start_insert = nil
@@ -340,100 +446,68 @@ local function insert_message(buf, draft_start, message)
     if not is_inside_thread(message) then
       start_insert, end_insert = find_new_conversation_position(buf, draft_start, message)
     else
-      last_message_in_thread = true  -- this is not necessarily true, eg when history for thread is fetched
-      local base_message = M.message_registry[message.thread_id]
-      if base_message then
-        local positions = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, base_message.thread_mark_id, { details = true })
-        start_thread = positions[1]
-        start_insert = positions[3]["end_row"]
-        end_insert = start_insert
-      else
+      local success = false
+      success, start_insert, end_insert = pcall(find_new_reply_position, buf, message)
+      if not success then
         return  -- ignore replies to threads we don't show
+      else
+        insert_into_ordered(M.ordered_replies[buf][message.thread_id], message)
       end
     end
   else  -- for an old message
-    local old_positions = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, old_message.mark_id, { details = true })
-    start_insert = old_positions[1]
-    local details = old_positions[3]
-    end_insert = details["end_row"]
-    if is_inside_thread(message) then
-      local base_message = M.message_registry[message.thread_id]
-      if base_message then
-        if base_message.thread_mark_id then
-          local positions = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns_id, base_message.thread_mark_id, { details = true })
-          start_thread = positions[1]
-          local end_row = positions[3]["end_row"]
-          if end_insert == end_row then
-            last_message_in_thread = true
-          end
-        end
-      end
-    end
+    start_insert, end_insert = get_message_positions(buf, old_message)
   end
 
-  -- insert lines
-  local body = format_message(message)
-  local message_lines = split_lines(body)
-  vim.api.nvim_buf_set_lines(buf, start_insert, end_insert, false, message_lines)
-
-  -- create/update message mark
-  -- add annotations
-  local virt_lines = generate_annotations(message)
-  mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0, {
-    id = old_mark_id,
-    end_row = start_insert + #message_lines,
-    virt_text = virt_lines,
-    virt_text_pos = "right_align",
-    hl_mode = "combine",
-  })
-  message.mark_id = mark_id
-
+  insert_formatted_message(buf, message, start_insert, end_insert)
 
   -- create/update thread mark
   if old_message and old_message.thread_mark_id then
     message.thread_mark_id = old_message.thread_mark_id
   end
 
+  local thread_start = nil
+  local thread_end = nil
 
   if is_inside_thread(message) then
-    local base_message = M.message_registry[message.thread_id]
-    if last_message_in_thread then
-      local thread_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_thread, 0, {
-        id = base_message.thread_mark_id,
-        end_row = start_insert + #message_lines,
-        hl_mode = "combine",
-      })
-      insert_message(buf, draft_start, base_message)
-    end
+    local base_message = M.message_registry[buf][message.thread_id]
+    thread_start, thread_end = get_thread_positions(buf, message.thread_id)
+
+    local thread_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, thread_start, 0, {
+      id = base_message.thread_mark_id,
+      end_row = thread_end,
+      hl_mode = "combine",
+    })
   else  -- new or old message that is not inside a thread, so potential thread start
-    local message_position = reverse_search(M.ordered_messages[buf], message)
+    local message_position = insert_into_ordered(M.ordered_messages[buf], message)
     local prev_message = M.ordered_messages[buf][message_position - 1]
     local virt_lines = nil
     if not prev_message or prev_message.ts_date ~= message.ts_date then
       virt_lines = { { { message.ts_date, "ChatTimeHighlight" } } }
     end
 
-    local thread_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0, {
+    if M.ordered_replies[buf][message.thread_id] then
+      thread_start, thread_end = get_thread_positions(buf, message.thread_id)
+    else
+      thread_start, thread_end = get_message_positions(buf, message)
+    end
+    local thread_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, thread_start, 0, {
       id = message.thread_mark_id,
-      end_row = start_insert + #message_lines,
+      end_row = thread_end,
       virt_lines = virt_lines,
       virt_lines_above = true,
       hl_mode = "combine",
     })
     message.thread_mark_id = thread_mark_id
-    local next_message =  M.ordered_messages[buf][message_position]
+    local next_message =  M.ordered_messages[buf][message_position + 1]
+    -- if not old_message then
+    --   insert_into_ordered(M.ordered_messages[buf], message)
+    -- end
     if next_message and next_message.ts_date == message.ts_date then
       insert_message(buf, draft_start, next_message)
-    end
-    if not old_message then
-      insert_into_ordered(M.ordered_messages[buf], message)
     end
 
   end
 
-  -- add message to registry
-  M.message_registry[message.id] = message
-  apply_styling(buf, message, start_insert)
 
 end
 
@@ -481,6 +555,43 @@ function M.add_channels(service, channels)
     node:expand()
   end
   M.channel_tree:render(1)
+end
+
+function M.foldlevel(linenum)
+  local level = 0
+  local buf = vim.api.nvim_get_current_buf()
+  local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, { linenum, 0 }, { linenum, -1 }, { overlap = true })
+  for _, mark in ipairs(marks) do
+    local mark_id = mark[1]
+    local found_level = M.mark_levels[buf][mark_id]["level"]
+    if found_level then
+      return found_level
+    end
+  end
+  return level
+
+end
+
+function _G.foldlevel_from_mark()
+  local linenum = vim.v.lnum
+  return M.foldlevel(linenum)
+end
+
+_G.foldtext_from_mark = function()
+  local fs = vim.v.foldstart
+  local fe = vim.v.foldend
+  local buf = vim.api.nvim_get_current_buf()
+  local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, { fs, 0 }, { fe - 1, -1 }, { overlap = true })
+  local count = 0
+  local folded_lines = fe - fs + 1
+  for _, mark in ipairs(marks) do
+    local mark_id = mark[1]
+    local found_level = M.mark_levels[buf][mark_id]["level"]
+    if found_level then
+      count = count + 1
+    end
+  end
+  return "[" .. count .. " replies]"
 end
 
 return M
