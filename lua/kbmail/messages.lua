@@ -1,5 +1,6 @@
 
 -- local fidget = require("fidget")
+
 local M = {}
 
 M.error_channel = { id = "errors", name = "Error Log" }
@@ -10,13 +11,14 @@ M.ordered_replies = M.ordered_replies or {}
 M.author_colors = M.author_colors or {}
 M.message_stylings = M.message_stylings or {}
 M.extra_line = true
-M.mark_levels = M.mark_levels or {}
+M.message_marks = M.message_marks or {}
 M.ns_id = vim.api.nvim_create_namespace("chat_ui")
 
-vim.wo.foldexpr = "v:lua.foldlevel_from_mark()"
-vim.wo.foldmethod = 'expr'
-vim.wo.foldcolumn = "auto"
-vim.wo.foldtext = "v:lua.foldtext_from_mark()"
+-- vim.wo.foldexpr = "v:lua.foldlevel_from_mark()"
+vim.wo.foldmethod = 'indent'
+vim.wo.breakindent = true
+-- vim.wo.foldcolumn = "auto"
+-- vim.wo.foldtext = "v:lua.foldtext_from_mark()"
 
 -- Define the sign used for editing indicators.
 vim.fn.sign_define("ChatEditingIndicator", {
@@ -27,6 +29,7 @@ vim.fn.sign_define("ChatEditingIndicator", {
 vim.api.nvim_set_hl(0, "ChatTimeHighlight", { fg = "gray50" })
 vim.api.nvim_set_hl(0, "ChatMessageAnnotationHighlight", { fg = "gray50" })
 
+M.indent = "  ▏ "
 
 local function get_author_highlight(author)
   if not M.author_colors[author.id] then
@@ -113,13 +116,26 @@ local function get_id(channel)
   return channel_id
 end
 
+function M.get_message_under_cursor(buf)
+  local cursor_pos = vim.api.nvim_win_get_cursor(0)
+  local row = cursor_pos[1]
+  local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, {row, 0}, {row, -1}, {overlap=true})
+  for _, mark in ipairs(marks) do
+    local mark_id = mark[1]
+    local level = M.message_marks[buf][mark_id]
+    if level then
+      return level["message"]
+    end
+  end
+end
+
 local function fetch_thread(buf)
   local cursor_pos = vim.api.nvim_win_get_cursor(0)
   local row = cursor_pos[1]
   local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, {row, 0}, {row, -1}, {overlap=true})
   for _, mark in ipairs(marks) do
     local mark_id = mark[1]
-    local level = M.mark_levels[buf][mark_id]
+    local level = M.message_marks[buf][mark_id]
     if level and level["level"] == 0 then
       local thread_id = level["message"].thread_id
       local ipc = require("kbmail.ipc")
@@ -134,13 +150,11 @@ function M.create_channel_buffer(channel)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype   = "nofile"
   vim.bo[buf].bufhidden = "hide"
-  if channel ~= M.error_channel then
-    vim.bo[buf].filetype = "markdown"
-  end
+
   vim.keymap.set("n", "q", function() vim.api.nvim_buf_delete(buf, { force = true }) end, { buffer = buf, silent = true })
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "# This is the beginning of the conversation for " .. channel.name })
   vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
-  M.channel_buffers[channel_id] = buf
+  M.channel_buffers[channel_id] = { buf = buf, channel = channel }
   vim.api.nvim_buf_set_var(buf, "channel", channel)
   local buf_name = channel.name
   if channel.service then
@@ -148,37 +162,49 @@ function M.create_channel_buffer(channel)
   end
   vim.api.nvim_buf_set_name(buf, "[" .. buf_name .. "]")
   vim.api.nvim_buf_set_var(buf, "draft_start", nil)
-  vim.keymap.set("n", "i", function()
-    start_draft(buf)
-  end, { buffer = buf, silent = true, noremap = true })
-  vim.keymap.set("n", "<Enter>", function()
-    send_draft(buf)
-  end, { buffer = buf, silent = true })
-  vim.keymap.set("n", "<leader>q", function()
-    cancel_draft(buf)
-  end, { buffer = buf, silent = true, noremap = true })
-  vim.keymap.set("n", "<leader>a", function()
-    fetch_thread(buf)
-  end, { buffer = buf, silent = true, noremap = true })
 
-  vim.api.nvim_buf_attach(buf, false, {
-    on_lines = function(_, bufnr, _, _, _, _)
-      update_draft_signs(bufnr)
-    end,
-  })
   M.ordered_messages[buf] = {}
   M.ordered_replies[buf] = {}
   M.message_stylings[buf] = {}
   M.message_registry[buf] = {}
-  M.mark_levels[buf] = {}
+  M.message_marks[buf] = {}
+
+  vim.keymap.set("n", "<leader><leader>", function()
+    local channel_picker = require("kbmail.channel_picker")
+    channel_picker.pick_channel()
+  end, { buffer = buf, silent = true, noremap = true })
+  if channel ~= M.error_channel then
+    vim.bo[buf].filetype = "markdown"
+    vim.keymap.set("n", "i", function()
+      start_draft(buf)
+    end, { buffer = buf, silent = true, noremap = true })
+    -- vim.keymap.set("n", "o", function()
+    --   start_draft_reply(buf)
+    -- end, { buffer = buf, silent = true, noremap = true })
+    vim.keymap.set("n", "<Enter>", function()
+      send_draft(buf)
+    end, { buffer = buf, silent = true })
+    vim.keymap.set("n", "<leader>q", function()
+      cancel_draft(buf)
+    end, { buffer = buf, silent = true, noremap = true })
+    vim.keymap.set("n", "<leader>a", function()
+      fetch_thread(buf)
+    end, { buffer = buf, silent = true, noremap = true })
+
+    vim.api.nvim_buf_attach(buf, false, {
+      on_lines = function(_, bufnr, _, _, _, _)
+        update_draft_signs(bufnr)
+      end,
+    })
+  end
   return buf
 end
 
 
 function M.get_channel_buffer(channel)
   local channel_id = get_id(channel)
-  if M.channel_buffers[channel_id] and vim.api.nvim_buf_is_valid(M.channel_buffers[channel_id]) then
-    return M.channel_buffers[channel_id]
+  if M.channel_buffers[channel_id] and vim.api.nvim_buf_is_valid(M.channel_buffers[channel_id]["buf"]) then
+    return M.channel_buffers[channel_id]["buf"]
   end
 end
 
@@ -212,7 +238,42 @@ local function show_unread_marker(buf)
   })
 end
 
+function M.on_win_scrolled(win)
+  local buf = vim.api.nvim_win_get_buf(win)
+  local channel = vim.api.nvim_buf_get_var(buf, "channel")
+  if last_line_is_visible(win, 0) then
+    M.mark_channel_read(channel)
+  end
+end
+
+function M.mark_channel_unread(channel)
+  channel.unread = true
+  if not M.channel_tree then
+    return
+  end
+  for _, node in pairs(M.channel_tree.nodes.by_id) do
+    if node.channel and node.channel.id == channel.id then
+      node.channel.unread = true
+    end
+  end
+  M.channel_tree:render(1)
+end
+
+function M.mark_channel_read(channel)
+  channel.unread = false
+  if not M.channel_tree then
+    return
+  end
+  for _, node in pairs(M.channel_tree.nodes.by_id) do
+    if node.channel and node.channel.id == channel.id then
+      node.channel.unread = false
+    end
+  end
+  M.channel_tree:render(1)
+end
+
 local function scroll(buf, draft_start, message_size)
+  local mark_as_unread = true
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     local should_scroll = last_line_is_visible(win, message_size)
     if not draft_start then
@@ -220,14 +281,22 @@ local function scroll(buf, draft_start, message_size)
         local cursor_pos = vim.api.nvim_win_get_cursor(win)
         vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
         vim.api.nvim_win_set_cursor(win, cursor_pos)
+        mark_as_unread = false
       else
-        local channel = vim.api.nvim_buf_get_var(buf, "channel")
+        mark_as_unread = true
+      end
+    else
+      mark_as_unread = false
+    end
+  end
+  local channel = vim.api.nvim_buf_get_var(buf, "channel")
+  if mark_as_unread then
         -- if channel.id ~= M.error_channel.id then
         --   fidget.notify("New message in " .. channel.name)
         -- end
-        show_unread_marker(buf)
-      end
-    end
+    M.mark_channel_unread(channel)
+  else
+    M.mark_channel_read(channel)
   end
 end
 
@@ -296,8 +365,14 @@ local function apply_styling(buf, message, start_insert)
     author_mark_id = M.message_stylings[buf][message.id]["author"]
     time_mark_id = M.message_stylings[buf][message.id]["time"]
   end
-  author_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0, { id = author_mark_id, end_col = #message.author.display_name, hl_group = author_hl })
-  time_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, #message.author.display_name + 1, { id = time_mark_id, end_col = #message.author.display_name + #message.ts_time + 1, hl_group = "ChatTimeHighlight" } )
+  local offset = 0
+  if is_inside_thread(message) then
+    offset = string.len(M.indent)
+  end
+  author_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, 0 + offset,
+    { id = author_mark_id, end_col = #message.author.display_name + offset, hl_group = author_hl })
+  time_mark_id = vim.api.nvim_buf_set_extmark(buf, M.ns_id, start_insert, #message.author.display_name + 1 + offset,
+    { id = time_mark_id, end_col = #message.author.display_name + #message.ts_time + 1 + offset, hl_group = "ChatTimeHighlight" } )
   M.message_stylings[buf][message.id] = { author = author_mark_id, time = time_mark_id }
 
   -- indent message body, and a bit more for thread replies
@@ -334,6 +409,12 @@ local function insert_formatted_message(buf, message, start_line, end_line)
   local number_of_lines = #message_lines
   local mark_id = nil
 
+  if is_inside_thread(message) then
+    for i, line in ipairs(message_lines) do
+      message_lines[i] = M.indent .. line
+    end
+  end
+
   vim.api.nvim_buf_set_lines(buf, start_line, end_line, false, message_lines)
   apply_styling(buf, message, start_line)
 
@@ -348,9 +429,9 @@ local function insert_formatted_message(buf, message, start_line, end_line)
   })
   message.mark_id = mark_id
   if is_inside_thread(message) then
-    M.mark_levels[buf][mark_id] = { level=1 , message=message}
+    M.message_marks[buf][mark_id] = { level=1 , message=message}
   else
-    M.mark_levels[buf][mark_id] = { level=0 , message=message}
+    M.message_marks[buf][mark_id] = { level=0 , message=message}
   end
 
   -- add message to registry
@@ -557,41 +638,41 @@ function M.add_channels(service, channels)
   M.channel_tree:render(1)
 end
 
-function M.foldlevel(linenum)
-  local level = 0
-  local buf = vim.api.nvim_get_current_buf()
-  local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, { linenum, 0 }, { linenum, -1 }, { overlap = true })
-  for _, mark in ipairs(marks) do
-    local mark_id = mark[1]
-    local found_level = M.mark_levels[buf][mark_id]["level"]
-    if found_level then
-      return found_level
-    end
-  end
-  return level
-
-end
-
-function _G.foldlevel_from_mark()
-  local linenum = vim.v.lnum
-  return M.foldlevel(linenum)
-end
-
-_G.foldtext_from_mark = function()
-  local fs = vim.v.foldstart
-  local fe = vim.v.foldend
-  local buf = vim.api.nvim_get_current_buf()
-  local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, { fs, 0 }, { fe - 1, -1 }, { overlap = true })
-  local count = 0
-  local folded_lines = fe - fs + 1
-  for _, mark in ipairs(marks) do
-    local mark_id = mark[1]
-    local found_level = M.mark_levels[buf][mark_id]["level"]
-    if found_level then
-      count = count + 1
-    end
-  end
-  return "[" .. count .. " replies]"
-end
+-- function M.foldlevel(linenum)
+--   local level = 0
+--   local buf = vim.api.nvim_get_current_buf()
+--   local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, { linenum, 0 }, { linenum, -1 }, { overlap = true })
+--   for _, mark in ipairs(marks) do
+--     local mark_id = mark[1]
+--     local found_level = M.mark_levels[buf][mark_id]["level"]
+--     if found_level then
+--       return found_level
+--     end
+--   end
+--   return level
+--
+-- end
+--
+-- function _G.foldlevel_from_mark()
+--   local linenum = vim.v.lnum
+--   return M.foldlevel(linenum)
+-- end
+--
+-- _G.foldtext_from_mark = function()
+--   local fs = vim.v.foldstart
+--   local fe = vim.v.foldend
+--   local buf = vim.api.nvim_get_current_buf()
+--   local marks = vim.api.nvim_buf_get_extmarks(buf, M.ns_id, { fs, 0 }, { fe - 1, -1 }, { overlap = true })
+--   local count = 0
+--   local folded_lines = fe - fs + 1
+--   for _, mark in ipairs(marks) do
+--     local mark_id = mark[1]
+--     local found_level = M.mark_levels[buf][mark_id]["level"]
+--     if found_level then
+--       count = count + 1
+--     end
+--   end
+--   return "[" .. count .. " replies]"
+-- end
 
 return M

@@ -44,6 +44,8 @@ function ui.make_channel_split()
         chan_name = NuiText(content)
         if node.channel.unread then
           chan_name:set(content, "SpecialChar")
+        else
+          return nil
         end
         line:append(chan_name)
         node.chan_name = chan_name

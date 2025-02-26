@@ -24,6 +24,7 @@ local T = new_set({
     pre_once = function ()
         messages.extra_line = false
         messages.create_channel_buffer(messages.error_channel)
+        messages.indent = ""
     end,
     pre_case = reinitialise_buf,
     post_case = function ()
@@ -370,7 +371,35 @@ T["Test changing replies"] = function()
 
 end
 
-T["Test foldexpr"] = function()
+-- T["Test foldexpr"] = function()
+--   local message = { author = { display_name = "good_old_me", id = "me" },
+--                     id = "1",
+--                     ts_time = "11:11",
+--                     ts_date = "2025-02-21",
+--                     body = "Hello world" }
+--   local message_replied = { author = { display_name = "good_old_me", id = "me" },
+--                     id = "1",
+--                     ts_time = "11:11",
+--                     ts_date = "2025-02-21",
+--                     replies = { count = 1 },
+--                     thread_id = "1",
+--                     body = "Hello world" }
+--   local reply1 = { author = { display_name = "good_old_me", id = "me" },
+--                    id = "3",
+--                    thread_id = "1",
+--                    ts_date = "2025-02-21",
+--                    ts_time = "11:13",
+--                    body = "Hello too" }
+--   messages.append_message(test_channel, message)
+--   messages.append_message(test_channel, message_replied)
+--   messages.append_message(test_channel, reply1)
+--   vim.api.nvim_set_current_buf(test_buf)
+--   eq(messages.foldlevel(2), 0)
+--   eq(messages.foldlevel(4), 0)
+--   eq(messages.foldlevel(6), 1)
+-- end
+
+T["Test message under cursor"] = function()
   local message = { author = { display_name = "good_old_me", id = "me" },
                     id = "1",
                     ts_time = "11:11",
@@ -392,12 +421,14 @@ T["Test foldexpr"] = function()
   messages.append_message(test_channel, message)
   messages.append_message(test_channel, message_replied)
   messages.append_message(test_channel, reply1)
-  vim.api.nvim_set_current_buf(test_buf)
-  eq(messages.foldlevel(2), 0)
-  eq(messages.foldlevel(4), 0)
-  eq(messages.foldlevel(6), 1)
+  vim.api.nvim_win_set_buf(0, test_buf)
+  vim.api.nvim_win_set_cursor(0, { 4, 0 })
+  local msg = messages.get_message_under_cursor(test_buf)
+  eq(msg.id, "1")
+  vim.api.nvim_win_set_cursor(0, { 6, 0 })
+  msg = messages.get_message_under_cursor(test_buf)
+  eq(msg.id, "3")
+
 end
-
-
 
 return T
