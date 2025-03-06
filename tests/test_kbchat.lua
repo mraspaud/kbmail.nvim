@@ -52,9 +52,6 @@ T["test append message"] = function()
   eq(printed, { display_name .. " 11:11", message.body })
   local author_line = header_size
   local extmarks = vim.api.nvim_buf_get_extmarks(test_buf, messages.ns_id, { author_line, 0 }, { author_line, -1 }, { details = true } )
-  -- for _, mark in ipairs(extmarks) do
-  --   print(vim.inspect(mark))
-  -- end
   eq(#extmarks, 4)
 
   local message_mark = vim.api.nvim_buf_get_extmark_by_id(test_buf, messages.ns_id, 3, { details = true })
@@ -131,7 +128,7 @@ T["Test appending replies" ] = function()
 
   local modified = { author = { display_name = "good_old_me", id = "me" },
                      id = "1",
-                    ts_date = "2025-02-21",
+                     ts_date = "2025-02-21",
                      ts_time = "11:11",
                      edit_time = "11:15",
                      body = "Hello world from neovim!" }

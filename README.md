@@ -40,7 +40,9 @@ To install **kbmail.nvim** using [lazy.nvim](https://github.com/folke/lazy.nvim)
 return {
   {
     "mraspaud/kbmail.nvim",
-    dependencies = { "nvim-lua/plenary.nvim" }, -- include if your plugin uses plenary
+    dependencies = { "nvim-lua/plenary.nvim",
+                     "j-hui/fidget.nvim",
+    },
     config = function()
       require("kbmail").setup({})
     end,
@@ -49,6 +51,7 @@ return {
 ```
 After saving your configuration, run :Lazy sync within Neovim to install the plugin.
 
+in order to input emojis easily, a plugin like [emoji.nvim](https://github.com/Allaman/emoji.nvim) is recommended.
 
 ## Requirements
 
